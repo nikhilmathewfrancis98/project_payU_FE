@@ -1,50 +1,124 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent, FormEvent } from "react";
+import { API_BASE_URL } from "./config";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080";
+type CustomerDetails = {
+  firstName: string;
+  email: string;
+  phone: string;
+};
+
+type Product = {
+  id: number;
+  name: string;
+  description?: string | null;
+  price: number;
+  active: boolean;
+};
+
+type CartItem = Product & { quantity: number };
+type CheckoutRequest = CustomerDetails & {
+  items: Array<{ productId: number; quantity: number }>;
+};
+type CheckoutResponse = {
+  actionUrl: string;
+  fields: Record<string, string>;
+};
+type PaymentItem = {
+  productId: number;
+  name: string;
+  unitPrice: number;
+  quantity: number;
+  lineTotal: number;
+};
+type PaymentRecord = {
+  orderId: string;
+  receiptId: string;
+  txnid: string;
+  amount: number;
+  productInfo: string;
+  status: string;
+  payuTransactionId: string | null;
+  createdAt: string;
+  items: PaymentItem[];
+};
+type ReconciliationResult = {
+  message: string;
+};
+type ProductForm = {
+  name: string;
+  description: string;
+  price: string;
+  active: boolean;
+};
+
 const CURRENCY = new Intl.NumberFormat("en-IN", {
   style: "currency",
   currency: "INR",
 });
 
-async function requestJson(url, options) {
-  const response = await fetch(url, options);
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(body.detail ?? body.message ?? "The request could not be completed.");
-  }
-  return body;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
-function CheckoutForm({ cart }) {
-  const [values, setValues] = useState({ firstName: "", email: "", phone: "" });
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "The request could not be completed.";
+}
+
+async function requestJson<T>(url: string, options: RequestInit = {}): Promise<T> {
+  const response = await fetch(url, options);
+  let body: unknown = null;
+  try {
+    body = await response.json();
+  } catch {
+    body = null;
+  }
+  if (!response.ok) {
+    const message = isRecord(body) ? body.detail ?? body.message : undefined;
+    throw new Error(typeof message === "string" ? message : "The request could not be completed.");
+  }
+  return body as T;
+}
+
+function CheckoutForm({ cart }: { cart: CartItem[] }) {
+  const [values, setValues] = useState<CustomerDetails>({ firstName: "", email: "", phone: "" });
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const checkoutAttempt = useRef({ payload: "", key: "" });
   const total = cart.reduce((sum, item) => sum + Number(item.price) * item.quantity, 0);
 
-  function update(event) {
-    setValues((current) => ({ ...current, [event.target.name]: event.target.value }));
-  }
-
-  async function submit(event) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
     setSubmitting(true);
 
     try {
-      const body = await requestJson(`${API_BASE_URL}/api/payments/checkout`, {
+      const payload: CheckoutRequest = {
+        items: cart.map((item) => ({ productId: item.id, quantity: item.quantity })),
+        ...values,
+      };
+      const payloadFingerprint = JSON.stringify(payload);
+      if (checkoutAttempt.current.payload !== payloadFingerprint) {
+        checkoutAttempt.current = {
+          payload: payloadFingerprint,
+          key: crypto.randomUUID(),
+        };
+      }
+
+      const body = await requestJson<CheckoutResponse>(`${API_BASE_URL}/api/payments/checkout`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          items: cart.map((item) => ({ productId: item.id, quantity: item.quantity })),
-          ...values,
-        }),
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": checkoutAttempt.current.key,
+        },
+        body: JSON.stringify(payload),
       });
 
       const form = document.createElement("form");
       form.method = "POST";
       form.action = body.actionUrl;
       form.acceptCharset = "UTF-8";
-      Object.entries(body.fields).forEach(([name, value]) => {
+      Object.entries(body.fields).forEach(([name, value]: [string, string]) => {
         const input = document.createElement("input");
         input.type = "hidden";
         input.name = name;
@@ -53,8 +127,8 @@ function CheckoutForm({ cart }) {
       });
       document.body.appendChild(form);
       form.submit();
-    } catch (requestError) {
-      setError(requestError.message || "Could not connect to the backend.");
+    } catch (requestError: unknown) {
+      setError(errorMessage(requestError) || "Could not connect to the backend.");
       setSubmitting(false);
     }
   }
@@ -67,17 +141,23 @@ function CheckoutForm({ cart }) {
       </div>
       <label>
         First name
-        <input name="firstName" value={values.firstName} onChange={update}
+        <input name="firstName" value={values.firstName}
+          onChange={(event: ChangeEvent<HTMLInputElement>) =>
+            setValues((current) => ({ ...current, firstName: event.target.value }))}
           autoComplete="given-name" maxLength="60" required />
       </label>
       <label>
         Email
-        <input name="email" type="email" value={values.email} onChange={update}
+        <input name="email" type="email" value={values.email}
+          onChange={(event: ChangeEvent<HTMLInputElement>) =>
+            setValues((current) => ({ ...current, email: event.target.value }))}
           autoComplete="email" maxLength="120" required />
       </label>
       <label>
         Phone
-        <input name="phone" type="tel" value={values.phone} onChange={update}
+        <input name="phone" type="tel" value={values.phone}
+          onChange={(event: ChangeEvent<HTMLInputElement>) =>
+            setValues((current) => ({ ...current, phone: event.target.value }))}
           inputMode="numeric" pattern="[0-9]{10}" maxLength="10"
           placeholder="10-digit number" autoComplete="tel" required />
       </label>
@@ -92,26 +172,26 @@ function CheckoutForm({ cart }) {
 }
 
 function ShopPage() {
-  const [products, setProducts] = useState([]);
-  const [quantities, setQuantities] = useState({});
+  const [products, setProducts] = useState<Product[]>([]);
+  const [quantities, setQuantities] = useState<Record<number, number>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    requestJson(`${API_BASE_URL}/api/products`)
+    requestJson<Product[]>(`${API_BASE_URL}/api/products`)
       .then(setProducts)
-      .catch((requestError) => setError(requestError.message))
+      .catch((requestError: unknown) => setError(errorMessage(requestError)))
       .finally(() => setLoading(false));
   }, []);
 
   const cart = useMemo(
-    () => products
+    (): CartItem[] => products
       .filter((product) => quantities[product.id] > 0)
       .map((product) => ({ ...product, quantity: quantities[product.id] })),
     [products, quantities],
   );
 
-  function adjust(productId, delta) {
+  function adjust(productId: number, delta: number) {
     setQuantities((current) => {
       const next = Math.max(0, Math.min(99, (current[productId] ?? 0) + delta));
       return { ...current, [productId]: next };
@@ -200,36 +280,41 @@ function ShopPage() {
 
 function AdminPage() {
   const [adminKey, setAdminKey] = useState("");
-  const [products, setProducts] = useState([]);
-  const [payments, setPayments] = useState([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [payments, setPayments] = useState<PaymentRecord[]>([]);
   const [reconciling, setReconciling] = useState("");
-  const [editingId, setEditingId] = useState(null);
-  const [form, setForm] = useState({ name: "", description: "", price: "", active: true });
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [form, setForm] = useState<ProductForm>({
+    name: "",
+    description: "",
+    price: "",
+    active: true,
+  });
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(false);
 
-  async function loadProducts(event) {
+  async function loadProducts(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
     setError("");
     setLoading(true);
     try {
-      const result = await requestJson(`${API_BASE_URL}/api/admin/products`, {
+      const result = await requestJson<Product[]>(`${API_BASE_URL}/api/admin/products`, {
         headers: { "X-Admin-Key": adminKey },
       });
       setProducts(result);
-      const savedPayments = await requestJson(`${API_BASE_URL}/api/admin/payments`, {
+      const savedPayments = await requestJson<PaymentRecord[]>(`${API_BASE_URL}/api/admin/payments`, {
         headers: { "X-Admin-Key": adminKey },
       });
       setPayments(savedPayments);
-    } catch (requestError) {
-      setError(requestError.message);
+    } catch (requestError: unknown) {
+      setError(errorMessage(requestError));
     } finally {
       setLoading(false);
     }
   }
 
-  function edit(product) {
+  function edit(product: Product) {
     setEditingId(product.id);
     setForm({
       name: product.name,
@@ -245,7 +330,7 @@ function AdminPage() {
     setForm({ name: "", description: "", price: "", active: true });
   }
 
-  async function saveProduct(event) {
+  async function saveProduct(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
     setNotice("");
@@ -253,7 +338,7 @@ function AdminPage() {
       const url = editingId
         ? `${API_BASE_URL}/api/admin/products/${editingId}`
         : `${API_BASE_URL}/api/admin/products`;
-      await requestJson(url, {
+      await requestJson<unknown>(url, {
         method: editingId ? "PUT" : "POST",
         headers: { "Content-Type": "application/json", "X-Admin-Key": adminKey },
         body: JSON.stringify({ ...form, price: Number(form.price) }),
@@ -261,27 +346,27 @@ function AdminPage() {
       resetForm();
       setNotice(editingId ? "Item updated." : "Item added.");
       await loadProducts();
-    } catch (requestError) {
-      setError(requestError.message);
+    } catch (requestError: unknown) {
+      setError(errorMessage(requestError));
     }
   }
 
-  async function reconcilePayment(txnid) {
+  async function reconcilePayment(txnid: string) {
     setError("");
     setNotice("");
     setReconciling(txnid);
     try {
-      const result = await requestJson(
+      const result = await requestJson<ReconciliationResult>(
         `${API_BASE_URL}/api/admin/payments/${encodeURIComponent(txnid)}/reconcile`,
         { method: "POST", headers: { "X-Admin-Key": adminKey } },
       );
       setNotice(result.message);
-      const savedPayments = await requestJson(`${API_BASE_URL}/api/admin/payments`, {
+      const savedPayments = await requestJson<PaymentRecord[]>(`${API_BASE_URL}/api/admin/payments`, {
         headers: { "X-Admin-Key": adminKey },
       });
       setPayments(savedPayments);
-    } catch (requestError) {
-      setError(requestError.message);
+    } catch (requestError: unknown) {
+      setError(errorMessage(requestError));
     } finally {
       setReconciling("");
     }
@@ -378,8 +463,8 @@ function AdminPage() {
   );
 }
 
-function PaymentResult({ txnid }) {
-  const [payment, setPayment] = useState(null);
+function PaymentResult({ txnid }: { txnid: string | null }) {
+  const [payment, setPayment] = useState<PaymentRecord | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -389,9 +474,9 @@ function PaymentResult({ txnid }) {
     }
 
     let active = true;
-    requestJson(`${API_BASE_URL}/api/payments/${encodeURIComponent(txnid)}`)
+    requestJson<PaymentRecord>(`${API_BASE_URL}/api/payments/${encodeURIComponent(txnid)}`)
       .then((result) => { if (active) setPayment(result); })
-      .catch((requestError) => { if (active) setError(requestError.message); });
+      .catch((requestError: unknown) => { if (active) setError(errorMessage(requestError)); });
     return () => { active = false; };
   }, [txnid]);
 
