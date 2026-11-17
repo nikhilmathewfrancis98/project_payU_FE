@@ -4,7 +4,7 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
-    "dev": "node scripts/copy-index.mjs && esbuild src/main.tsx --bundle --outdir=dist/assets --servedir=dist --serve=5173 --watch",
+    "dev": "node scripts/dev.mjs",
     "build": "tsc --noEmit && esbuild src/main.tsx --bundle --minify --outdir=dist/assets && node scripts/copy-index.mjs",
     "typecheck": "tsc --noEmit"
   },
